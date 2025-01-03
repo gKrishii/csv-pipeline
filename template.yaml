@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CSV Pipeline with S3 -> Lambda -> S3, SNS for error alerts,
+  no explicit "FunctionName" property to avoid read-only conflicts.
+
+Parameters:
+  UniqueInputBucketName:
+    Type: String
+    Description: A globally unique name for the INPUT bucket
+    Default: "mycompany-input-123"  # change to something truly unique
+
+  UniqueOutputBucketName:
+    Type: String
+    Description: A globally unique name for the OUTPUT bucket
+    Default: "mycompany-output-123"  # change to something truly unique
+
+  AdminEmail:
+    Type: String
+    Description: Email address for failure notifications
+    Default: "admin@example.com"
+
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket name where lambda_package.zip is stored
+
+  LambdaCodeS3Key:
+    Type: String
+    Description: Path/key to lambda_package.zip in the above bucket
+
+Resources:
+  # -----------------------------------------------------------
+  # SNS Topic + Subscription
+  # -----------------------------------------------------------
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: csv-processing-alerts
+
+  AlertsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref AdminEmail
+      TopicArn: !Ref AlertsTopic
+
+  # -----------------------------------------------------------
+  # S3 Buckets
+  # -----------------------------------------------------------
+  InputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref UniqueInputBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: ".csv"
+            Function: !GetAtt ProcessingLambda.Arn
+    DependsOn:
+      - LambdaPermissionForS3
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref UniqueOutputBucketName
+      VersioningConfiguration:
+        Status: Enabled
+
+  # -----------------------------------------------------------
+  # IAM Role for Lambda
+  # -----------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3AndSNSAccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Wide S3 access to avoid referencing the bucket resource (prevents circular dep).
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "*"
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertsTopic
+
+  # -----------------------------------------------------------
+  # Lambda Function (Auto-generated name)
+  # -----------------------------------------------------------
+  ProcessingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      # No "FunctionName" property => CFN will generate one
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      Environment:
+        Variables:
+          OUTPUT_BUCKET: !Ref UniqueOutputBucketName
+          SNS_TOPIC_ARN: !Ref AlertsTopic
+
+  # -----------------------------------------------------------
+  # Lambda Permission for S3
+  # -----------------------------------------------------------
+  # Grants the input bucket permission to invoke the Lambda.
+  # Using the parameter-based ARN (avoid referencing the resource directly).
+  LambdaPermissionForS3:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt ProcessingLambda.Arn
+      Principal: "s3.amazonaws.com"
+      SourceArn: !Sub "arn:aws:s3:::${UniqueInputBucketName}"
+
+Outputs:
+  # Show final resources created
+  InputBucketName:
+    Description: S3 bucket for CSV uploads
+    Value: !Ref UniqueInputBucketName
+
+  OutputBucketName:
+    Description: S3 bucket for transformed CSVs
+    Value: !Ref UniqueOutputBucketName
+
+  ProcessingLambdaName:
+    Description: The name of the auto-generated Lambda function
+    Value: !Ref ProcessingLambda
+
+  AlertsTopicArn:
+    Description: SNS Alerts Topic ARN
+    Value: !Ref AlertsTopic
